@@ -9,31 +9,36 @@ Este arquivo é a CAMADA em volta dele que o faz se comportar como um
 personagem consistente. Os 4 blocos do nosso diagrama estão aqui,
 cada um marcado com um comentário [BLOCO N].
 
+NOVIDADE desta versão: além do motor de mentirinha (mock), agora existe
+o MOTOR REAL do Claude. O código detecta sozinho:
+  - Se a biblioteca 'anthropic' estiver instalada E houver uma chave de API
+    na variável de ambiente ANTHROPIC_API_KEY  ->  usa o Claude de verdade.
+  - Caso contrário  ->  cai no mock, sem quebrar. Você vê a arquitetura
+    funcionar mesmo sem chave.
+
 Para quem vem do Pascal/MATLAB:
-  - Não tem 'begin/end' nem ';' no fim da linha. A INDENTAÇÃO é a estrutura.
-  - 'def' é o que você chamava de 'function'/'procedure'.
-  - Uma lista [ ... ] é como um vetor do MATLAB, mas pode guardar qualquer coisa.
-  - Um dicionário { "chave": valor } é uma tabela de pares nome->valor.
+  - A INDENTAÇÃO é a estrutura (não tem begin/end nem ';').
+  - 'def' é function/procedure. Lista [ ] é como um vetor. Dicionário { } é
+    uma tabela de pares nome->valor.
 """
 
+import os
 from dataclasses import dataclass, field
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# [BLOCO 1] DEFINIÇÃO DA PERSONA
-# Quem é o personagem? Isto é o "system prompt": um texto fixo que descreve
-# identidade, tom e regras. É o equivalente a inicializar as variáveis globais
-# do programa antes de tudo começar.
+# [BLOCO 1] DEFINIÇÃO DA PERSONA  ->  vira o "system" da API real
+# Quem é o personagem? Identidade, tom e regras. Texto fixo.
 # ─────────────────────────────────────────────────────────────────────────────
 @dataclass
 class Persona:
     nome: str
-    descricao: str          # quem ele é, em uma frase
-    tom: str                # como ele fala
-    regras: list = field(default_factory=list)  # o que ele sempre/nunca faz
+    descricao: str
+    tom: str
+    regras: list = field(default_factory=list)
 
     def system_prompt(self) -> str:
-        """Transforma a persona estruturada em um texto que o motor entende."""
+        """A persona estruturada vira o texto que ocupa o slot 'system'."""
         linhas = [
             f"Você é {self.nome}. {self.descricao}",
             f"Tom de voz: {self.tom}.",
@@ -46,50 +51,90 @@ class Persona:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# [BLOCO 2] MEMÓRIA
-# O motor é SEM ESTADO (stateless): esquece tudo entre uma chamada e outra,
-# igual a uma função pura. Então NÓS guardamos o histórico aqui e reinjetamos
-# a cada rodada. Esta lista é a "RAM" do personagem.
+# [BLOCO 2] MEMÓRIA  ->  vira a lista "messages" da API real
+# O motor é SEM ESTADO: esquece tudo entre chamadas. Nós guardamos o histórico
+# e reinjetamos a cada rodada. Guardamos no formato CANÔNICO da API:
+# cada item é {"role": "user" ou "assistant", "content": "<texto>"}.
 # ─────────────────────────────────────────────────────────────────────────────
 class Memoria:
     def __init__(self):
-        self.historico = []  # cada item: {"papel": "user"/"assistant", "texto": "..."}
+        self.historico = []  # lista de {"role": ..., "content": ...}
 
-    def lembrar(self, papel: str, texto: str):
-        self.historico.append({"papel": papel, "texto": texto})
+    def lembrar(self, role: str, content: str):
+        self.historico.append({"role": role, "content": content})
 
-    def como_texto(self) -> str:
-        return "\n".join(f"{m['papel']}: {m['texto']}" for m in self.historico)
+    def como_texto(self, persona: "Persona") -> str:
+        """Versão legível, usada só pelo motor de mentirinha."""
+        rotulo = {"user": "user", "assistant": persona.nome}
+        return "\n".join(f"{rotulo[m['role']]}: {m['content']}" for m in self.historico)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# [BLOCO 3] MONTADOR DE PROMPT (o orquestrador)
-# Junta  Persona + Memória + mensagem nova  em UMA entrada para o motor.
+# [BLOCO 3] MONTADOR DE PROMPT (usado só pelo motor de mentirinha)
+# A API real NÃO precisa disto — ela recebe system + messages separados.
+# Mantemos aqui só para o mock ter o que mastigar.
 # ─────────────────────────────────────────────────────────────────────────────
 def montar_prompt(persona: Persona, memoria: Memoria, mensagem: str) -> str:
     return (
         f"{persona.system_prompt()}\n\n"
         f"--- Conversa até agora ---\n"
-        f"{memoria.como_texto()}\n"
+        f"{memoria.como_texto(persona)}\n"
         f"user: {mensagem}\n"
         f"{persona.nome}:"
     )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# [BLOCO 4] O MOTOR (LLM)
-# Esta é a única peça que você NÃO escreve de verdade — na vida real é a API
-# do Claude. Aqui usamos um "motor de mentirinha" (mock) para você ver a
-# arquitetura funcionando offline, sem precisar de chave de API ainda.
-# Mais pra frente trocamos só esta função pela chamada real ao Claude.
+# [BLOCO 4] OS MOTORES
 # ─────────────────────────────────────────────────────────────────────────────
-def motor_mock(prompt: str, persona: Persona) -> str:
-    """Devolve uma resposta encenada, só para provar que os blocos se conectam."""
+def motor_mock(persona: Persona, memoria: Memoria, mensagem: str) -> str:
+    """Motor de mentirinha: encena uma resposta, roda offline e de graça."""
+    prompt = montar_prompt(persona, memoria, mensagem)
     return (
         f"[{persona.nome} responderia aqui, no tom '{persona.tom}'. "
-        f"O motor recebeu um prompt de {len(prompt)} caracteres com toda a "
-        f"persona e a memória embutidas.]"
+        f"O motor recebeu um prompt de {len(prompt)} caracteres.]"
     )
+
+
+def motor_claude(persona: Persona, memoria: Memoria, mensagem: str) -> str:
+    """Motor REAL: liga nos servidores da Anthropic e o Claude pensa de verdade.
+
+    Repare como os blocos viram parâmetros da API:
+      - system   <- a Persona   [BLOCO 1]
+      - messages <- a Memória + a mensagem nova   [BLOCO 2]
+      - model    <- qual Claude usar
+    """
+    import anthropic  # só importamos aqui dentro, quando realmente vamos usar
+
+    cliente = anthropic.Anthropic()  # lê a chave de ANTHROPIC_API_KEY sozinho
+
+    resposta = cliente.messages.create(
+        model="claude-opus-4-8",                 # o modelo mais capaz
+        max_tokens=1000,                          # teto de tamanho da resposta
+        system=persona.system_prompt(),           # [BLOCO 1] a persona
+        messages=memoria.historico + [            # [BLOCO 2] memória + fala nova
+            {"role": "user", "content": mensagem}
+        ],
+    )
+    # A resposta vem em blocos; pegamos o primeiro bloco de texto.
+    return next(bloco.text for bloco in resposta.content if bloco.type == "text")
+
+
+def escolher_motor():
+    """Decide qual motor usar: o real (se der) ou o mock (sempre disponível)."""
+    tem_chave = bool(os.environ.get("ANTHROPIC_API_KEY"))
+    try:
+        import anthropic  # noqa: F401
+        tem_sdk = True
+    except ImportError:
+        tem_sdk = False
+
+    if tem_chave and tem_sdk:
+        print("[motor: CLAUDE REAL]\n")
+        return motor_claude
+    print("[motor: MOCK — instale 'anthropic' e defina ANTHROPIC_API_KEY "
+          "para ligar o Claude real]\n")
+    return motor_mock
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -97,12 +142,12 @@ def motor_mock(prompt: str, persona: Persona) -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 def conversar(persona: Persona, mensagens: list):
     memoria = Memoria()
+    motor = escolher_motor()                                  # BLOCO 4
     print(f"=== Conversando com {persona.nome} ===\n")
     for mensagem in mensagens:
-        prompt = montar_prompt(persona, memoria, mensagem)   # BLOCO 3
-        resposta = motor_mock(prompt, persona)               # BLOCO 4
+        resposta = motor(persona, memoria, mensagem)         # BLOCO 4
         memoria.lembrar("user", mensagem)                    # BLOCO 2
-        memoria.lembrar(persona.nome, resposta)              # BLOCO 2
+        memoria.lembrar("assistant", resposta)               # BLOCO 2
         print(f"você: {mensagem}")
         print(f"{persona.nome}: {resposta}\n")
 
