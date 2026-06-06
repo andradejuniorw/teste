@@ -33,12 +33,15 @@ from dataclasses import dataclass, field
 @dataclass
 class Persona:
     nome: str
-    descricao: str
-    tom: str
+    descricao: str = ""
+    tom: str = ""
     regras: list = field(default_factory=list)
+    system_completo: str = ""  # se preenchido, vira o system inteiro (ex.: carregado de um TXT)
 
     def system_prompt(self) -> str:
         """A persona estruturada vira o texto que ocupa o slot 'system'."""
+        if self.system_completo:
+            return self.system_completo
         linhas = [
             f"Você é {self.nome}. {self.descricao}",
             f"Tom de voz: {self.tom}.",
